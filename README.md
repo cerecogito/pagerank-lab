@@ -1,73 +1,91 @@
 # PageRank Lab
 
-Two independent ways to compute PageRank, compared rigorously on reproducible synthetic graphs:
+PageRank can be computed in two completely different ways. You can simulate a random surfer
+clicking links and count where they end up, or you can solve for the fixed point directly with
+iteration. I implemented both from scratch and put them head to head on reproducible graphs. I
+wanted to see how fast each converges, how noisy the sampling is, and when the two actually
+agree on the ranking.
 
-1. **Monte Carlo:** a seeded random surfer walks the Markov chain, and visit frequencies estimate PageRank.
-2. **Iteration:** simultaneous fixed-point updates until max |change| < 1e-8, then checked against
-   a direct linear solve before being used as the reference.
+It's based on the PageRank project from Harvard's CS50 AI course, which I extended into a proper
+benchmark and a few targeted experiments.
 
-This is a study of probabilistic algorithms, numerical convergence, stochastic estimation and
-computational cost. All graphs are generated locally; nothing is crawled from the internet.
-The small HTML crawler reads only local files.
+## How it works
 
-## Quick start
+- **Random surfer (Monte Carlo):** with probability d the surfer follows a random link on the
+  current page, otherwise they jump to any page at random. A page with no links sends them
+  anywhere. Visit frequencies over 100,000 seeded steps estimate PageRank.
+- **Iteration:** start everyone at 1/N and apply the PageRank update to all pages at once until
+  nothing changes by more than 1e-8.
+- **Trust, but verify:** before I use the iterative answer as the reference, I check it against
+  a direct linear solve of the stationary equations. Stopping when the changes get small is not
+  the same thing as being accurate.
+- **Crawler:** a small crawler reads a local folder of HTML pages, with no network access at
+  all. It safely ignores external links, fragments, self-links, duplicates and missing pages.
 
-Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and the locked numpy, scipy
-and matplotlib (plus pytest).
+## Results
+
+**Benchmark:** 21 scenarios, made of 7 graph sizes (8 to 1,000 pages) times 3 damping factors
+(0.70, 0.85 and 0.95), with 100,000 samples each.
+
+| What I measured | Result |
+|---|---|
+| Iterations to converge (tolerance 1e-8) | median **18**, max **26** |
+| Mean absolute gap between sampling and iteration | median **0.00027** |
+| Spearman rank correlation | median **0.994**, min **0.852** |
+| Iterative vs direct solve | within **7.8e-9** in every scenario |
+
+The interesting part is what happens as the graphs grow:
+
+- **Numbers get closer, rankings get worse.** On the 1,000-page graphs, sampling has the
+  smallest numerical error of all, yet the lowest rank correlation. The cause is exact ties. In
+  the 1,000-page graphs, half the pages have *identical* PageRank, because every page with no
+  incoming links gets the same value. Random sampling can't reproduce a tie, so it shuffles those
+  pages. Small error and accurate ranking are different things.
+- **The error falls like 1/√samples.** I ran budgets of 1,000, 10,000 and 100,000 samples with 5
+  seeds each. The fitted log-log slope came out at -0.50, so 10x more samples buys about 3x less
+  error.
+- **Graph structure drives convergence.** Two dense communities joined by just 4 links needed 52
+  iterations at d = 0.95, because the Google matrix's second eigenvalue sits close to d.
+- **The stopping rule can miss the true answer.** On those weakly connected graphs, the
+  iterative answer landed up to 3.7e-8 from the true answer even with a 1e-8 tolerance. The
+  stopping rule bounds the last change, not the error, which is exactly why the direct-solve
+  check is there.
+
+## Running it
+
+You need [uv](https://docs.astral.sh/uv/), which sets up Python 3.12 and the locked dependencies.
 
 ```bash
 cd pagerank-lab
 uv sync
-uv run pytest                                  # fast unit + integration tests
-uv run python scripts/run_all.py               # full experiment (100,000-sample benchmark), about 1 minute
-uv run python scripts/run_all.py --quick       # reduced samples for development -> reports/quick/
-uv run python scripts/run_benchmark.py         # only the 21-scenario benchmark
+uv run pytest                              # 65 tests, a few seconds
+uv run python scripts/run_all.py           # the full experiment, about a minute
+uv run python scripts/run_all.py --quick   # small sample counts while developing
 ```
 
-## What is measured
+Everything lands in `reports/`:
+- the 21-scenario CSV;
+- the sampling-budget and graph-structure results;
+- the exact input graphs;
+- charts of sampling error and rank correlation by graph size and damping;
+- `results_summary.md`;
+- `cv_evidence.json`.
 
-- **21-scenario benchmark:** graph sizes 8, 16, 32, 64, 128, 256 and 1,000 pages × damping 0.70,
-  0.85 and 0.95, with 100,000 samples each. For every scenario it records:
-  - pages, links and dangling pages;
-  - seeds;
-  - iterations;
-  - the iterative-vs-direct check;
-  - mean absolute difference (MAD);
-  - Spearman's rho (tie-aware; undefined values never replaced);
-  - the exact-tie fraction;
-  - sampling and iteration time, kept in a separate timing file.
-- **Sampling-budget experiment:** 1,000, 10,000 and 100,000 samples × 5 seeds on 32-, 256- and
-  1,000-page graphs. It measures error, rank correlation, runtime and the error-vs-budget slope.
-- **Graph-structure sensitivity:** many dangling pages, hub-dominated, two weakly linked
-  communities and uniform targets, each at three damping factors. It explains convergence with
-  the second eigenvalue |λ2| of the Google matrix.
-- **Numerical vs ranking accuracy:** real examples of small error with low rank correlation, and
-  of large error with perfect rank correlation.
-
-## Outputs (`reports/`)
-
-| File | Content | Deterministic? |
-|---|---|---|
-| `results_summary.md` | methodology, headline statistics, all 21 scenarios, experiments, limitations | yes |
-| `benchmark_results.csv` | one row per scenario (21 rows) | yes |
-| `budget_results.csv`, `budget_summary.csv` | sampling-budget experiment | yes |
-| `structure_results.csv`, `numeric_vs_rank.csv` | structure experiment and illustration | yes |
-| `inputs/benchmark_graph_N.json` | the exact benchmark graphs | yes |
-| `figures/*.png` | sampling error and rank correlation by size and damping, plus the budget chart | yes |
-| `cv_evidence.json` | metric definitions, values, seeds, commands, evidence files, CV-figure check | yes |
-| `*_timings.csv`, `timing_report.md` | wall-clock timings | **no** (runtime metadata) |
+Every seed is written down, so re-running gives byte-identical results. Only the timing files
+differ between runs.
 
 ## Layout
 
 ```
 src/pagerank_lab/
-  crawl.py       local HTML crawler (no network; safe file-name resolution)
-  core.py        transition model, Monte Carlo sampler, iterative PageRank, direct-solve check
-  graphs.py      deterministic synthetic graph generators
-  metrics.py     mean absolute difference, tie-aware Spearman (undefined handled), aggregation
-  benchmark.py   21 scenarios, budget and structure experiments, seed strategy
-  reporting.py   CSV and chart writers
-data/html_demo/  4 hand-written pages with crawler edge cases
+  crawl.py       local HTML crawler
+  core.py        transition model, random surfer, iteration, direct-solve check
+  graphs.py      seeded synthetic graph generators
+  metrics.py     mean absolute error, tie-aware Spearman, aggregation
+  benchmark.py   the 21 scenarios and the extra experiments
+  reporting.py   CSVs and charts
+data/html_demo/  four hand-written pages full of crawler edge cases
 scripts/         run_benchmark.py, run_all.py
-docs/            methodology.md, interview_preparation.md
+tests/
+docs/methodology.md
 ```
